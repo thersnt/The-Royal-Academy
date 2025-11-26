@@ -5,7 +5,7 @@ import aiosqlite
 import typing
 import os
 import asyncio
-from utils import load_data, save_data, PROFILE_FILE 
+import datetime
 
 # --- ⚙️ การตั้งค่า ---
 CURRENCY_SYMBOL = "R" 
@@ -28,7 +28,35 @@ class Profile(commands.Cog):
         self.bot = bot
         self.db_path = os.path.join(os.getcwd(), DB_NAME)
 
+    async def cog_load(self):
+        # สร้างตาราง student_profiles ในฐานข้อมูล
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS student_profiles (
+                    user_id INTEGER PRIMARY KEY,
+                    profile_name TEXT,
+                    grade TEXT,
+                    faceclaim TEXT,
+                    image_url TEXT,
+                    affiliation_role TEXT,
+                    logo_url TEXT,
+                    thread_id INTEGER,
+                    wallet_thread_id INTEGER,
+                    inventory_thread_id INTEGER,
+                    trading_thread_id INTEGER,
+                    desk_thread_id INTEGER,
+                    id_card_url TEXT
+                )
+            """)
+            await db.commit()
+
     # --- ✨ Helper Functions (Async) ---
+    async def _get_profile_data(self, user_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row # เพื่อให้เรียกชื่อคอลัมน์ได้
+            async with db.execute("SELECT * FROM student_profiles WHERE user_id = ?", (user_id,)) as cursor:
+                return await cursor.fetchone()
+
     async def _get_live_royals_balance(self, user_id: int) -> int:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("SELECT balance FROM royals WHERE user_id = ?", (user_id,)) as cursor:
@@ -45,8 +73,8 @@ class Profile(commands.Cog):
                 result = await cursor.fetchone()
                 return result[0] if result else 0
 
-    # --- 🖼️ Embed Creator (Sync) ---
-    def create_profile_embed(self, member: discord.Member, data: dict, current_balance: int, rp_count: int, affiliation_data: tuple):
+    # --- 🖼️ Embed Creator ---
+    def create_profile_embed(self, member: discord.Member, data: aiosqlite.Row, affiliation_data: tuple):
         role_name, logo_url, role_color = affiliation_data
         
         embed = discord.Embed(
@@ -58,16 +86,12 @@ class Profile(commands.Cog):
         if logo_url and logo_url != 'URL_FOR_DEFAULT_LOGO':
             embed.set_thumbnail(url=logo_url) 
         
-        if data.get('image_url'):
+        if data['image_url']:
             embed.set_image(url=data['image_url'])
 
         embed.add_field(name="ชั้นปี", value=data['grade'] or "ไม่ระบุ", inline=True)
         embed.add_field(name="สังกัด", value=role_name, inline=True)
         embed.add_field(name="เฟซเคลม", value=data['faceclaim'] or "ไม่ระบุ", inline=True)
-        
-        # Stats
-        embed.add_field(name=f"💰 เงินในบัญชี", value=f"`{current_balance:,} {CURRENCY_SYMBOL}`", inline=True)
-        embed.add_field(name="🎭 สถิติการโรลเพลย์", value=f"**{rp_count:,}** โพสต์", inline=True)
         
         details = "• เธรดหลักได้ถูกจัดเตรียมไว้เรียบร้อยแล้ว\n• กดลิงก์เพื่อเข้าไปใช้งานได้ทันที\n"
         embed.add_field(name="💼 รายละเอียดเธรดต่าง ๆ", value=details, inline=False)
@@ -75,8 +99,16 @@ class Profile(commands.Cog):
         # Links
         links = []
         guild_id = member.guild.id
-        for key, name in [('thread_id', 'Biography'), ('wallet_thread_id', 'Wallet'), ('inventory_thread_id', 'Inventory'), ('trading_thread_id', 'Trading'), ('desk_thread_id', 'Desk')]:
-            tid = data.get(key)
+        thread_map = {
+            'thread_id': 'Biography',
+            'wallet_thread_id': 'Wallet',
+            'inventory_thread_id': 'Inventory',
+            'trading_thread_id': 'Trading',
+            'desk_thread_id': 'Desk'
+        }
+        
+        for col, name in thread_map.items():
+            tid = data[col]
             if tid: links.append(f"• **⚜ {name}** (https://discord.com/channels/{guild_id}/{tid})")
             
         link_value = "\n".join(links) if links else "ไม่พบลิงก์เธรดส่วนตัว"
@@ -90,28 +122,22 @@ class Profile(commands.Cog):
 
     @app_commands.command(name='setup_profile', description='ลงทะเบียนประวัตินักเรียน')
     async def setup_profile_command(self, interaction: discord.Interaction):
-        profiles = load_data(PROFILE_FILE)
-        user_id_str = str(interaction.user.id)
-        if user_id_str in profiles and 'thread_id' in profiles[user_id_str]:
-            thread_id = profiles[user_id_str]['thread_id']
-            return await interaction.response.send_message(f"❌ คุณมีโปรไฟล์แล้ว! <#{thread_id}>", ephemeral=True)
+        # เช็คก่อนว่ามีโปรไฟล์ไหม
+        profile = await self._get_profile_data(interaction.user.id)
+        if profile:
+             return await interaction.response.send_message(f"❌ คุณมีโปรไฟล์แล้ว! <#{profile['thread_id']}>", ephemeral=True)
+        
         await interaction.response.send_modal(ProfileSetupModal(self.db_path))
 
     @app_commands.command(name="profile", description="แสดงบัตรนักเรียนของคุณ")
     async def profile_command(self, interaction: discord.Interaction, member: discord.Member = None):
         await interaction.response.defer(ephemeral=False)
         target = member or interaction.user
-        uid_str = str(target.id)
         
-        profiles = load_data(PROFILE_FILE)
-        if uid_str not in profiles or 'thread_id' not in profiles[uid_str]:
+        data = await self._get_profile_data(target.id)
+        
+        if not data:
             return await interaction.followup.send(f"❌ {target.display_name} ยังไม่ได้สร้างโปรไฟล์", ephemeral=True)
-
-        data = profiles[uid_str]
-        
-        # Async Fetch Data
-        balance = await self._get_live_royals_balance(target.id)
-        rp_stats = await self._get_rp_stats(target.id)
         
         role_name = data['affiliation_role']
         # Find affiliation data safely
@@ -122,7 +148,7 @@ class Profile(commands.Cog):
                 break
         if not aff_data: aff_data = (role_name, data['logo_url'], discord.Color.default())
 
-        embed = self.create_profile_embed(target, data, balance, rp_stats, aff_data)
+        embed = self.create_profile_embed(target, data, aff_data)
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="add_id_card", description="[STAFF] เพิ่มรูปบัตรนักเรียน")
@@ -130,44 +156,52 @@ class Profile(commands.Cog):
         if not any(r.name in STAFF_ACCESS_ROLES for r in interaction.user.roles):
             return await interaction.response.send_message("❌ ไม่มีสิทธิ์", ephemeral=True)
 
-        profiles = load_data(PROFILE_FILE)
-        if str(member.id) not in profiles:
-            return await interaction.response.send_message("❌ ยังไม่มีโปรไฟล์", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        
+        profile = await self._get_profile_data(member.id)
+        if not profile:
+            return await interaction.followup.send("❌ สมาชิกยังไม่มีโปรไฟล์", ephemeral=True)
 
-        profiles[str(member.id)]['id_card_url'] = image_url
-        await save_data(profiles, PROFILE_FILE)
-        await interaction.response.send_message(f"✅ บันทึกรูปบัตรให้ {member.display_name} แล้ว", ephemeral=True)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("UPDATE student_profiles SET id_card_url = ? WHERE user_id = ?", (image_url, member.id))
+            await db.commit()
+
+        await interaction.followup.send(f"✅ บันทึกรูปบัตรให้ {member.display_name} แล้ว", ephemeral=True)
 
     @app_commands.command(name="remove_id_card", description="[STAFF] ลบรูปบัตรนักเรียน")
     async def remove_id_card(self, interaction: discord.Interaction, member: discord.Member):
         if not any(r.name in STAFF_ACCESS_ROLES for r in interaction.user.roles):
             return await interaction.response.send_message("❌ ไม่มีสิทธิ์", ephemeral=True)
 
-        profiles = load_data(PROFILE_FILE)
-        if str(member.id) in profiles and 'id_card_url' in profiles[str(member.id)]:
-            del profiles[str(member.id)]['id_card_url']
-            await save_data(profiles, PROFILE_FILE)
-            await interaction.response.send_message(f"🗑️ ลบรูปบัตรของ {member.display_name} แล้ว", ephemeral=True)
-        else:
-            await interaction.response.send_message("⚠️ ไม่พบรูปบัตร", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("UPDATE student_profiles SET id_card_url = NULL WHERE user_id = ?", (member.id,))
+            await db.commit()
+
+        await interaction.followup.send(f"🗑️ ลบรูปบัตรของ {member.display_name} แล้ว", ephemeral=True)
 
     @app_commands.command(name="my_id_card", description="โชว์บัตรนักเรียน (รูปใหญ่)")
     async def my_id_card(self, interaction: discord.Interaction, member: discord.Member = None):
+        await interaction.response.defer(ephemeral=False)
+        
         target = member or interaction.user
         # Check permissions if viewing others
         if target.id != interaction.user.id:
             if not any(r.name in STAFF_ACCESS_ROLES for r in interaction.user.roles):
-                return await interaction.response.send_message("❌ ดูได้เฉพาะบัตรตัวเอง", ephemeral=True)
+                return await interaction.followup.send("❌ ดูได้เฉพาะบัตรตัวเอง", ephemeral=True)
 
-        profiles = load_data(PROFILE_FILE)
-        url = profiles.get(str(target.id), {}).get('id_card_url')
-        
-        if not url: return await interaction.response.send_message("❌ ยังไม่มีรูปบัตรนักเรียน", ephemeral=True)
+        data = await self._get_profile_data(target.id)
+        if not data: return await interaction.followup.send("❌ ยังไม่ได้ลงทะเบียน", ephemeral=True)
+
+        url = data['id_card_url']
+        if not url: return await interaction.followup.send("❌ ยังไม่มีรูปบัตรนักเรียน", ephemeral=True)
         
         embed = discord.Embed(title="🆔 Student ID Card", color=target.color)
         embed.set_image(url=url)
         embed.set_footer(text=f"Card Holder: {target.display_name}", icon_url=target.display_avatar.url)
-        await interaction.response.send_message(embed=embed)
+        
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="delete_profile", description="[STAFF] ลบโปรไฟล์และข้อมูลทั้งหมด")
     async def delete_profile(self, interaction: discord.Interaction, member: discord.Member):
@@ -175,28 +209,29 @@ class Profile(commands.Cog):
             return await interaction.response.send_message("❌ ไม่มีสิทธิ์", ephemeral=True)
         
         await interaction.response.defer(ephemeral=True)
-        uid_str = str(member.id)
-        profiles = load_data(PROFILE_FILE)
         
-        if uid_str not in profiles:
-            return await interaction.followup.send("⚠️ ไม่พบโปรไฟล์", ephemeral=True)
+        profile = await self._get_profile_data(member.id)
+        if not profile:
+             return await interaction.followup.send("⚠️ ไม่พบโปรไฟล์", ephemeral=True)
 
         # Delete Threads
-        p = profiles[uid_str]
-        threads = [p.get('thread_id'), p.get('wallet_thread_id'), p.get('inventory_thread_id'), p.get('trading_thread_id'), p.get('desk_thread_id')]
+        threads = [
+            profile['thread_id'], profile['wallet_thread_id'], 
+            profile['inventory_thread_id'], profile['trading_thread_id'], 
+            profile['desk_thread_id']
+        ]
+        
         for tid in threads:
             if tid:
                 try: await (self.bot.get_channel(tid)).delete()
                 except: pass
 
-        # Delete JSON Data
-        del profiles[uid_str]
-        await save_data(profiles, PROFILE_FILE)
-        
-        # Delete DB Data (Optional: Call DataCleanup logic here or let it be)
+        # Delete Data from DB
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM royals WHERE user_id=?", (member.id,))
-            await db.execute("DELETE FROM inventory WHERE user_id=?", (member.id,))
+            await db.execute("DELETE FROM student_profiles WHERE user_id = ?", (member.id,))
+            await db.execute("DELETE FROM royals WHERE user_id = ?", (member.id,))
+            await db.execute("DELETE FROM inventory WHERE user_id = ?", (member.id,))
+            # Add other deletions if needed
             await db.commit()
 
         await interaction.followup.send(f"🗑️ ลบโปรไฟล์ {member.display_name} เรียบร้อย", ephemeral=False)
@@ -241,11 +276,12 @@ class AffiliationSelectView(discord.ui.View):
         role = discord.utils.get(member.guild.roles, name=role_name)
         if role: 
             try: await member.add_roles(role)
-            except: pass # Ignore error if bot role is lower
+            except: pass 
 
         # 2. Create Threads
         threads = {}
         try:
+            # สร้างเธรดแบบไล่ลำดับ (รอ Discord API นิดนึงกัน Rate Limit)
             threads['main'] = await interaction.channel.create_thread(name=f"📜—Biography", type=discord.ChannelType.private_thread)
             await asyncio.sleep(0.5)
             threads['wallet'] = await interaction.channel.create_thread(name=f"💰—Wallet", type=discord.ChannelType.private_thread)
@@ -261,26 +297,19 @@ class AffiliationSelectView(discord.ui.View):
         # 3. Clear Application DB
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM applications WHERE user_id=?", (member.id,))
+            
+            # 4. Save to Database (Not JSON)
+            await db.execute("""
+                INSERT OR REPLACE INTO student_profiles 
+                (user_id, profile_name, grade, faceclaim, image_url, affiliation_role, logo_url, 
+                 thread_id, wallet_thread_id, inventory_thread_id, trading_thread_id, desk_thread_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                member.id, self.data['name'], self.data['grade'], self.data['fc'], self.data['img'], 
+                role_name, logo_url,
+                threads['main'].id, threads['wallet'].id, threads['inv'].id, threads['trade'].id, threads['desk'].id
+            ))
             await db.commit()
-
-        # 4. Save JSON
-        profile = {
-            'profile_name': self.data['name'],
-            'grade': self.data['grade'],
-            'faceclaim': self.data['fc'],
-            'image_url': self.data['img'],
-            'thread_id': threads['main'].id,
-            'wallet_thread_id': threads['wallet'].id,
-            'inventory_thread_id': threads['inv'].id,
-            'trading_thread_id': threads['trade'].id,
-            'desk_thread_id': threads['desk'].id,
-            'affiliation_role': role_name,
-            'logo_url': logo_url
-        }
-        
-        p_data = load_data(PROFILE_FILE)
-        p_data[str(member.id)] = profile
-        await save_data(p_data, PROFILE_FILE)
 
         # 5. Setup Threads (Add User & Send Msgs)
         staffs = []
@@ -295,6 +324,7 @@ class AffiliationSelectView(discord.ui.View):
         
         await threads['main'].send(f"{staff_tag}\n> **Biography**\n> {member.mention}")
         await threads['wallet'].send(f"{staff_tag}\n> **Wallet**\n> Use `/balance`")
+        await threads['inv'].send(f"{staff_tag}\n> **Inventory**")
         
         # 6. Final Response
         await interaction.followup.send(f"✅ เสร็จสิ้น! เชิญที่ {threads['main'].mention}", ephemeral=False)
