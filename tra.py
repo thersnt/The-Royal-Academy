@@ -2,9 +2,10 @@ import discord
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
-from aiohttp import web # นำเข้า web server
+from aiohttp import web
+import asyncio
 
-# โหลด Token (รองรับทั้ง .env และ Environment Variable ของ Render)
+# โหลด Token
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
@@ -39,8 +40,8 @@ class RoyalBot(commands.Bot):
             except Exception as e:
                 print(f"❌ Failed to load {ext}: {e}")
 
-        # --- 🌐 RENDER KEEP-ALIVE ---
-        # สร้าง Web Server จำลองเพื่อให้ Render ตรวจจับว่า App ทำงานอยู่ (Bind Port)
+        # --- 🌐 RENDER KEEP-ALIVE (Web Server) ---
+        # สร้าง Web Server จำลองเพื่อให้ Render รู้ว่า App ทำงานอยู่
         app = web.Application()
         async def home(request):
             return web.Response(text="🤖 The Royal Academy Bot is Online!")
@@ -49,7 +50,7 @@ class RoyalBot(commands.Bot):
         runner = web.AppRunner(app)
         await runner.setup()
         
-        # ดึง Port จาก Environment Variable (Render จะส่งค่า PORT มาให้)
+        # Render จะส่ง PORT มาทาง Environment Variable (ถ้าไม่มีใช้ 8080)
         port = int(os.getenv("PORT", 8080))
         site = web.TCPSite(runner, '0.0.0.0', port)
         await site.start()
@@ -70,4 +71,5 @@ if __name__ == '__main__':
     if TOKEN:
         bot.run(TOKEN)
     else:
-        print("❌ Error: DISCORD_TOKEN not found. Please check your Render Environment Variables.")
+        print("❌ Error: DISCORD_TOKEN not found. Please check your .env or Render Environment Variables.")
+
