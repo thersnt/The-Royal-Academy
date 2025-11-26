@@ -343,3 +343,7 @@ class Profile(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Profile(bot))
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(Profile(bot))
+
