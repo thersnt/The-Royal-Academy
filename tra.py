@@ -1,64 +1,73 @@
 import discord
 from discord.ext import commands
-from discord import app_commands
-import asyncio
 import os
-# 🚨 เปลี่ยนไปใช้ aiosqlite แทน sqlite3
-import aiosqlite 
+from dotenv import load_dotenv
+from aiohttp import web # นำเข้า web server
 
-# ----------------- A. ส่วน Keep Alive ถูกลบแล้ว (ถูกต้อง) --------------------
+# โหลด Token (รองรับทั้ง .env และ Environment Variable ของ Render)
+load_dotenv()
+TOKEN = os.getenv('DISCORD_TOKEN')
 
-# --- ⚙️ ตัวแปรการตั้งค่าหลัก (Global Settings) ---
-DB_NAME = 'school_data.db'
-# ... (ตัวแปรอื่น ๆ)
+# ตั้งค่า Intents
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
 
-# --- 📚 การตั้งค่า Bot Intents ---
-# ... (ส่วน Intents และ bot = commands.Bot)
+class RoyalBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix='!', intents=intents, help_command=None)
 
-# --- ฐานข้อมูล: การเชื่อมต่อและการตั้งค่าตารางหลัก (Primary Tables) ---
-async def connect_db():
-    # 🚨 ใช้ aiosqlite.connect() แทน sqlite3.connect()
-    conn = await aiosqlite.connect(DB_NAME)
-    
-    # 🚨 ใช้ await conn.execute() สำหรับคำสั่งฐานข้อมูล
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS user_data ( 
-            user_id INTEGER PRIMARY KEY, 
-            is_approved BOOLEAN DEFAULT 0
-        );
-    ''')
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS applications (
-            user_id INTEGER PRIMARY KEY,
-            application_text TEXT,
-            submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    ''')
-    await conn.commit()
-    # 🚨 ส่งคืนค่า conn ที่เป็น Async Connection
-    return conn
+    async def setup_hook(self):
+        # โหลดไฟล์ระบบต่างๆ (Cogs)
+        extensions = [
+            'cogs.roles',
+            'cogs.profile',
+            'cogs.economy',
+            'cogs.shop',
+            'cogs.inventory',
+            'cogs.clubs',
+            'cogs.school_activities',
+            'cogs.rp_system',
+            'cogs.features',
+            'cogs.data_cleanup'
+        ]
+        
+        for ext in extensions:
+            try:
+                await self.load_extension(ext)
+                print(f"✅ Loaded extension: {ext}")
+            except Exception as e:
+                print(f"❌ Failed to load {ext}: {e}")
 
-# --- 🌟 รายการ COGS ที่ต้องโหลดทั้งหมด ---
-# ... (EXTENSIONS)
+        # --- 🌐 RENDER KEEP-ALIVE ---
+        # สร้าง Web Server จำลองเพื่อให้ Render ตรวจจับว่า App ทำงานอยู่ (Bind Port)
+        app = web.Application()
+        async def home(request):
+            return web.Response(text="🤖 The Royal Academy Bot is Online!")
+        
+        app.router.add_get('/', home)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        
+        # ดึง Port จาก Environment Variable (Render จะส่งค่า PORT มาให้)
+        port = int(os.getenv("PORT", 8080))
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        print(f"🌐 Web server started on port {port} (Render Ready)")
 
-async def load_cogs():
-# ... (ไม่ต้องแก้ไข)
-    
-@bot.event
-async def on_ready():
-    # 🚨 ต้องใช้ await ก่อน connect_db() เพราะตอนนี้มันเป็น Async แล้ว
-    await connect_db() 
-    
-    await bot.change_presence(activity=discord.Game(name="ดูแลระบบโรงเรียน (v.Cogs)"))
-    print(f'*** {bot.user} ออนไลน์แล้ว! กำลังโหลด Cogs... ***')
-    
-    await load_cogs() 
-    
-    # ซิงค์คำสั่ง Slash (สำคัญ: ทำครั้งเดียวหลังโหลดทั้งหมด)
-    await bot.tree.sync() 
-    print("--- โหลดระบบทั้งหมดและซิงค์คำสั่งเสร็จสมบูรณ์ ---")
+    async def on_ready(self):
+        print(f'✨ Logged in as {self.user} (ID: {self.user.id})')
+        print('🏰 The Royal Academy System is Online!')
+        try:
+            synced = await self.tree.sync()
+            print(f"🌳 Synced {len(synced)} slash commands")
+        except Exception as e:
+            print(f"⚠️ Sync failed: {e}")
 
-# ... (คำสั่ง !sync)
-    
-# ----------------- B. ส่วนรันบอทหลัก -----------------
-# ... (ส่วนรันบอทหลัก)
+bot = RoyalBot()
+
+if __name__ == '__main__':
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        print("❌ Error: DISCORD_TOKEN not found. Please check your Render Environment Variables.")
