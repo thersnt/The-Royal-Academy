@@ -207,26 +207,44 @@ class SchoolActivities(commands.Cog):
     async def host_teaparty(self, interaction: discord.Interaction, theme: str = "จิบชายามบ่าย", max_participants: int = 6):
         if not (2 <= max_participants <= 10): 
             return await interaction.response.send_message("❌ จำนวนคนต้องอยู่ระหว่าง 2 - 10 คน", ephemeral=True)
+        
         if not await self._check_weekly_limit(interaction.user.id, "host_teaparty"): 
             return await interaction.response.send_message("❌ คุณใช้โควตา 'จัดปาร์ตี้' ครบแล้ว", ephemeral=True)
 
         await interaction.response.defer(ephemeral=False)
+        await self._process_transaction(interaction.user.id, TEA_HOST_COST, "TEA_PARTY_HOST", False)
         await self._log_activity(interaction.user.id, "host_teaparty")
 
         view = TeaPartyLobbyView(interaction.user, theme, max_participants, self)
         embed = discord.Embed(title=f"☕ Tea Party: {theme}", description=f"**{interaction.user.display_name}** เปิดโต๊ะน้ำชา!\nต้องการสมาชิก: **{max_participants} คน**\n\n*เมื่อคนครบแล้ว เจ้าภาพกดเริ่มเพื่อเข้าสู่ช่วงโรลเพลย์*", color=discord.Color.from_rgb(255, 182, 193))
         embed.add_field(name="ผู้เข้าร่วม", value=f"1. {interaction.user.mention} (Host)", inline=False)
-        msg = await interaction.followup.send(embed=embed, view=view)
-        view.message = msg
+        
+        message = await interaction.followup.send(embed=embed, view=view)
+        view.message = message
 
 # --- Views ---
+
 class PotionIngredientSelect(discord.ui.Select):
     def __init__(self, selected_values=None):
         options = []
         if selected_values is None: selected_values = []
+        
+        # ✅ FIX: บังคับแปลงค่า selected_values เป็น string ทั้งหมด
+        safe_selected = [str(v) for v in selected_values]
+
         for i in POTION_INGREDIENTS:
-            is_default = i['value'] in selected_values
-            options.append(discord.SelectOption(label=i['label'], value=i['value'], emoji=i['emoji'], description=f"{i['price']} R", default=is_default))
+            val_str = str(i['value'])
+            # ✅ FIX: บังคับแปลงผลลัพธ์เป็น bool (True/False) ชัดเจน (แก้ Invalid Form Body)
+            is_default = bool(val_str in safe_selected)
+            
+            options.append(discord.SelectOption(
+                label=i['label'], 
+                value=val_str, 
+                emoji=i['emoji'], 
+                description=f"ราคา: {i['price']} {CURRENCY_SYMBOL}", 
+                default=is_default
+            ))
+            
         super().__init__(placeholder="เลือกส่วนผสม...", min_values=1, max_values=len(POTION_INGREDIENTS), options=options)
 
     async def callback(self, interaction):
@@ -245,6 +263,8 @@ class PotionBrewingView(discord.ui.View):
         self.clear_items()
         self.add_item(PotionIngredientSelect(self.selected_ingredients))
         disabled = len(self.selected_ingredients) < 3
+        
+        # ✅ แก้ไข Signature ของ callback ให้ถูกต้อง
         start_btn = discord.ui.Button(label="🔥 เริ่มปรุงยา", style=discord.ButtonStyle.danger, disabled=disabled)
         start_btn.callback = self.start_brew
         self.add_item(start_btn)
@@ -253,17 +273,18 @@ class PotionBrewingView(discord.ui.View):
         total = 0
         for val in self.selected_ingredients:
             for i in POTION_INGREDIENTS:
-                if i['value'] == val: total += i['price']
+                if str(i['value']) == str(val): total += i['price']
         return total
 
     async def update_embed(self, interaction):
         total_cost = self.get_total_cost()
         embed = interaction.message.embeds[0]
         embed.clear_fields()
+        
         price_list = "\n".join([f"{i['emoji']} {i['label']}: **{i['price']} R**" for i in POTION_INGREDIENTS])
         embed.add_field(name="📜 รายการวัตถุดิบ", value=price_list, inline=False)
         
-        selected = [f"{i['emoji']} {i['label']}" for val in self.selected_ingredients for i in POTION_INGREDIENTS if i['value'] == val]
+        selected = [f"{i['emoji']} {i['label']}" for val in self.selected_ingredients for i in POTION_INGREDIENTS if str(i['value']) == str(val)]
         embed.add_field(name="เลือกแล้ว", value="\n".join(selected) if selected else "-", inline=False)
         embed.add_field(name="รวม", value=f"**{total_cost:,} R**", inline=False)
         
@@ -271,7 +292,9 @@ class PotionBrewingView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def start_brew(self, interaction):
-        if interaction.user.id != self.user.id: return
+        if interaction.user.id != self.user.id: 
+            return await interaction.response.send_message("คุณไม่ใช่เจ้าของหม้อปรุงยานี้", ephemeral=True)
+        
         total_cost = self.get_total_cost()
         
         async with aiosqlite.connect(self.cog.db_path) as db:
@@ -286,10 +309,9 @@ class PotionBrewingView(discord.ui.View):
 
         new_bal = await self.cog._process_transaction(interaction.user.id, total_cost, "LUCK_BREW_COST", False)
         
-        receipt = discord.Embed(title="🧾 บันทึกกิจกรรม: ปรุงยา", color=discord.Color.red(), timestamp=datetime.datetime.now())
-        receipt.add_field(name="รายการ", value="ซื้อวัตถุดิบปรุงยา", inline=False)
-        receipt.add_field(name="จำนวนเงิน", value=f"-{total_cost:,} {CURRENCY_SYMBOL}", inline=True)
-        receipt.add_field(name="คงเหลือ", value=f"{new_bal:,} {CURRENCY_SYMBOL}", inline=True)
+        receipt = discord.Embed(title="🧾 จ่ายค่าปรุงยา", color=discord.Color.red())
+        receipt.add_field(name="จ่าย", value=f"-{total_cost}")
+        receipt.add_field(name="เหลือ", value=f"{new_bal}")
         await self.cog._notify_wallet_thread(interaction.user, receipt)
 
         await interaction.followup.send("🔥 เริ่มปรุงยา...")
@@ -303,7 +325,6 @@ class PotionBrewingView(discord.ui.View):
         
         res_type = random.choices(["Fail", "Low", "Medium", "Good", "Excellent"], weights=w)[0]
         
-        # Fixed Profit Logic
         bonus = 0
         reward = 0
         title, desc, color = "", "", discord.Color.default()
@@ -313,32 +334,31 @@ class PotionBrewingView(discord.ui.View):
         else:
             if res_type == "Low": 
                 bonus = int(10 + 10*scale)
-                title, desc, color = "🧪 คุณภาพต่ำ", f"ขายได้ทุน + กำไร {bonus} R", discord.Color.light_grey()
+                title, desc, color = "🧪 คุณภาพต่ำ", f"คืนทุน + กำไร {bonus} R", discord.Color.light_grey()
             elif res_type == "Medium": 
                 bonus = int(30 + 20*scale)
-                title, desc, color = "⚗️ คุณภาพปานกลาง", f"ขายได้กำไร {bonus} R", discord.Color.blue()
+                title, desc, color = "⚗️ คุณภาพปานกลาง", f"คืนทุน + กำไร {bonus} R", discord.Color.blue()
             elif res_type == "Good": 
                 bonus = int(40 + 50*scale)
-                title, desc, color = "✨ คุณภาพดี", f"ขายได้กำไร {bonus} R", discord.Color.gold()
+                title, desc, color = "✨ คุณภาพดี", f"คืนทุน + กำไร {bonus} R", discord.Color.gold()
             elif res_type == "Excellent": 
                 bonus = int(100 + 100*scale)
-                title, desc, color = "👑 คุณภาพยอดเยี่ยม", f"ขายได้กำไร {bonus} R", discord.Color.purple()
+                title, desc, color = "👑 คุณภาพยอดเยี่ยม", f"คืนทุน + กำไร {bonus} R", discord.Color.purple()
             reward = total_cost + bonus
-
+        
         await self.cog._log_activity(interaction.user.id, "brew_potion")
         
         embed = discord.Embed(title=title, description=desc, color=color)
-        embed.add_field(name="ต้นทุน", value=f"{total_cost:,} R")
+        embed.add_field(name="ลงทุน", value=f"{total_cost}")
         
         if reward > 0:
             nb = await self.cog._process_transaction(interaction.user.id, reward, "LUCK_BREW_SOLD", True)
-            embed.add_field(name="ขายได้", value=f"+{reward:,} R")
-            embed.add_field(name="กำไรสุทธิ", value=f"**+{bonus:,} R**")
+            embed.add_field(name="ขายได้", value=f"+{reward}")
             
             rec = discord.Embed(title="💰 ขายน้ำยา", color=discord.Color.green())
             rec.add_field(name="ระดับ", value=res_type)
-            rec.add_field(name="ได้รับ", value=f"+{reward:,} R")
-            rec.add_field(name="คงเหลือ", value=f"{nb:,} R")
+            rec.add_field(name="ได้รับ", value=f"+{reward}")
+            rec.add_field(name="เหลือ", value=f"{nb}")
             await self.cog._notify_wallet_thread(interaction.user, rec)
         else:
             embed.add_field(name="ผล", value="สูญเสียทั้งหมด")
@@ -471,4 +491,5 @@ class TeaPartyRoleplayView(discord.ui.View):
 
 async def setup(bot):
     await bot.add_cog(SchoolActivities(bot))
+
 
